@@ -70,7 +70,6 @@ func (r *routingTable) hostPortToNode(hostPort string, port string) (node *remot
 	if address.String() == "" {
 		return nil, "", false, fmt.Errorf("programming error: address resolution for hostPortToNode returned an empty string")
 	}
-	(*r.log).Debugf("hostPortToNode key: %s", address.String())
 	n, existed := r.addresses[address.String()]
 	if existed && n == nil {
 		return nil, "", false, fmt.Errorf("programming error: hostPortToNode found nil node in address table")

@@ -22,7 +22,7 @@ var RateLimit = -1 // -1 to disable limition
 var MaxUDPPacketSize = 4096
 
 // var RoutingTableCleanupPeriod = 15 * time.Minute
-var RoutingTableCleanupPeriod = 10 * time.Second
+var RoutingTableCleanupPeriod = 60 * time.Second
 var SecretRotatePeriod = 5 * time.Minute
 var DuatStorePeriod = 5 * time.Minute
 
@@ -366,7 +366,6 @@ func (this *Duat) processPacket(p packetType) {
 				this.log.Errorf("[Duat] Unknown query type: %v from %v", query.Type, addr)
 		}
 		delete(node.pendingQueries, r.T)
-		this.log.Debugf("delete query id %v-%v-%v", r.T, this.netPort, p.raddr.Port)
 	case r.Y == "q":
 		if r.A.Id == this.NodeIdStr {
 			this.log.Infof("[Duat] received request from self, id %x", r.A.Id)
@@ -380,10 +379,10 @@ func (this *Duat) processPacket(p packetType) {
 		if !existed {
 			this.log.Infof("[Duat] received request from a brand new host: %v", p.raddr)
 			if this.routingTable.length() < MaxNodes {
+				this.log.Infof("[Duat] MaxNodes exceeded")
 				this.requestPingIP(addr)
 			}
 		}
-		this.log.Debugf("[Duat] get query id %v-%v-%v", r.T, p.raddr.Port, this.netPort)
 		switch r.Q {
 		case "ping":
 			this.respondPing(p.raddr, r)
@@ -445,7 +444,6 @@ func (this *Duat) requestPing(r *remoteNode) {
 	this.log.Debugf("[Duat] network: request ping against %x@%v, distance: %x", r.id, r.address, hashDistance(InfoHash(r.id), InfoHash(this.NodeId)))
 	sendMsg(this.listener, r.address, query, this.log)
 	// totalSentPing.Add(1)
-	this.log.Debugf("[Duat] send %p %v-%v-%v", r, query.T, this.netPort, r.address.Port)
 }
 
 func (this *Duat) requestFindNode(r *remoteNode, ih InfoHash) {
@@ -464,7 +462,6 @@ func (this *Duat) requestFindNode(r *remoteNode, ih InfoHash) {
 	this.log.Debugf("[Duat] network: request find_node against %x@%v, InfoHash: %x, distance: %x", r.id, r.address, ih, hashDistance(InfoHash(r.id), ih))
 	r.lastSearchTime = time.Now()
 	sendMsg(this.listener, r.address, query, this.log)
-	this.log.Debugf("[Duat] send %p %v-%v-%v", r, query.T, this.netPort, r.address.Port)
 }
 
 func (this *Duat) requestGetPeers(r *remoteNode, ih InfoHash) {
@@ -483,7 +480,6 @@ func (this *Duat) requestGetPeers(r *remoteNode, ih InfoHash) {
 	this.log.Debugf("[Duat] network: request get_peers against %x@%v, InfoHash: %x, distance: %x", r.id, r.address, ih, hashDistance(InfoHash(r.id), InfoHash(this.NodeId)))
 	r.lastSearchTime = time.Now()
 	sendMsg(this.listener, r.address, query, this.log)
-	this.log.Debugf("[Duat] send %p %v-%v-%v", r, query.T, this.netPort, r.address.Port)
 }
 
 func (this *Duat) requestAnnouncePeer(address net.UDPAddr, ih InfoHash, port int, token string) {
@@ -502,7 +498,6 @@ func (this *Duat) requestAnnouncePeer(address net.UDPAddr, ih InfoHash, port int
 	}
 	query := queryMessage{transId, "q", ty, queryArguments}
 	sendMsg(this.listener, address, query, this.log)
-	this.log.Debugf("[Duat] send %p %v-%v-%v", r, query.T, this.netPort, r.address.Port)
 	// d.DebugLogger.Debugf("DHT: announce_peer => address: %v, ih: %x, token: %x", address, ih, token)
 	this.log.Debugf("[Duat] network: request announce_peer against %x@%v, InfoHash: %x, distance: %x", 
 		r.id, r.address, ih, hashDistance(InfoHash(r.id), InfoHash(this.NodeId)))
@@ -597,6 +592,20 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 	)
 	// node can be nil if, for example, the server just restarted and received an announce_peer
 	// from a node it doesn't yet know about.
+	if node == nil {
+		n, _, existed, err := this.routingTable.hostPortToNode(addr.String(), this.netProto)
+		if err != nil {
+			this.log.Errorf("hostPortToNode failed: %s", err)
+		} else if !existed {
+			// maybe MaxNode limition is exceeded, but we need this one
+			this.requestPingIP(addr.String())
+		} else {
+			node = n
+		}
+	}
+	if !checkToken(this.tokenSecrets, addr, r.A.Token) {
+		this.log.Errorf("[Duat] respondAnnouncePeer get invalid token")
+	}
 	if node != nil && checkToken(this.tokenSecrets, addr, r.A.Token) {
 		/*
 		if _, isMgnted := this.routingTable.hsMgnted[string(ih)]; !isMgnted {
@@ -671,7 +680,7 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 			this.log.Debugf("[Duat] DUPE node reference, query %x: %x@%v from %x@%v. Distance: %x.",
 					query.ih, id, address, node.id, node.address, hashDistance(query.ih, InfoHash(node.id)))
 			continue
-		} 
+		}
 		this.log.Infof("[Duat] got new node reference, query %x: %x@%v from %x@%v. Distance: %x.",
 				query.ih, id, address, node.id, node.address, hashDistance(query.ih, InfoHash(node.id)))
 		// Includes the node in the routing table and ignores errors.
