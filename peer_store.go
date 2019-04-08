@@ -1,7 +1,6 @@
 package dht
 
 import (
-	"fmt"
 	"container/ring"
 
 	"github.com/golang/groupcache/lru"
@@ -18,43 +17,38 @@ type peerContactsSet struct {
 // different set of contacts, if possible.
 func (p *peerContactsSet) next() []string {
 	count := kNodes
-	fmt.Printf("p.set len: %d\n", len(p.set))
 	if count > len(p.set) {
 		count = len(p.set)
 	}
 	x := make([]string, 0, count)
 	xx := make(map[string]bool) //maps are easier to dedupe
 	for range p.set {
-		nid := p.ring.Move(1).Value.(string)
+		// nid := p.ring.Move(1).Value.(string)
+		p.ring = p.ring.Next()
+		nid := p.ring.Value.(string)
 		if _, ok := xx[nid]; p.set[nid] && !ok {
-			fmt.Printf("1 add %x\n", nid)
 			xx[nid] = true
 		} else {
-			fmt.Printf("1 skip %x\n", nid)
 		}
 		if len(xx) >= count {
-			fmt.Printf("1: %d >= %d, breaking\n", len(xx), count)
 			break
 		}
 	}
 
 	if len(xx) < count {
 		for range p.set {
-			nid := p.ring.Move(1).Value.(string)
+			// nid := p.ring.Move(1).Value.(string)
+			p.ring = p.ring.Next()
+			nid := p.ring.Value.(string)
 			if _, ok := xx[nid]; ok {
-				fmt.Printf("2 skip %x\n", nid)
 				continue
 			}
-			fmt.Printf("2 add %x\n", nid)
 			xx[nid] = true
 			if len(xx) >= count {
-				fmt.Printf("2: %d >= %d, breaking\n", len(xx), count)
 				break
 			}
-			fmt.Printf("IMPSET ITEM2\n")
 		}
 	}
-	fmt.Printf("xx len: %d\n", len(xx))
 	for id := range xx {
 		x = append(x, id)
 	}

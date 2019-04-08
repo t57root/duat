@@ -26,6 +26,17 @@ var RoutingTableCleanupPeriod = 10 * time.Second
 var SecretRotatePeriod = 5 * time.Minute
 var DuatStorePeriod = 5 * time.Minute
 
+type ihReq struct {
+	target  *remoteNode
+	ih      InfoHash
+	options announceOptions
+}
+
+type announceOptions struct {
+	announce bool
+	port     int
+}
+
 type Duat struct {
 	NodeId			InfoHash
 	NodeIdStr		string
@@ -43,8 +54,8 @@ type Duat struct {
 	stopChan		chan bool
 	 //reqAddNode		chan string
 	reqPingChan		chan ihReq
-	reqGetPeersChan	chan ihReq
 	reqFindNodeChan	chan ihReq
+	reqGetPeersChan	chan ihReq
 	 //reqAnnounce		chan bool
 	////// runtime data //////
 	netAddr			string
@@ -56,17 +67,6 @@ type Duat struct {
 	tokenSecrets    []string
 	////// config //////
 	seed			[]string
-}
-
-type ihReq struct {
-	target  *remoteNode
-	ih      InfoHash
-	options announceOptions
-}
-
-type announceOptions struct {
-	announce bool
-	port     int
 }
 
 func NewDuat (port int, seed []string) (duat *Duat, err error) {
@@ -112,13 +112,13 @@ func NewDuat (port int, seed []string) (duat *Duat, err error) {
 		// utils
 		 //listener:		nil,
 		throttler:		nettools.NewThrottler(ClientPerMinuteLimit, ThrottlerTrackedClients),
-		log: 			logger,
+		log:			logger,
 		// channels for async ops 
 		stopChan:		make(chan bool),
 		 //reqAddNode:		make(chan string, 10),
 		reqPingChan:	make(chan ihReq, 10),
-		reqGetPeersChan:make(chan ihReq, 10),
 		reqFindNodeChan:make(chan ihReq, 10),
+		reqGetPeersChan:make(chan ihReq, 10),
 		 //reqAnnounce:	make(chan bool, 10),
 		// runtime data
 		netAddr:		"0.0.0.0",
