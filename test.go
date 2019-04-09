@@ -40,7 +40,7 @@ func NewNew(p int, s []string) *Duat {
 func Mytest() {
     var ds []*Duat
 
-	end := 1030
+	end := 1010
 
 	oldgonum := runtime.NumGoroutine()
 
@@ -55,9 +55,7 @@ func Mytest() {
     d.outable = true
     ds = append(ds, d)
 
-	ds[24].outable = true
-	ds[18].outable = true
-    
+	ds[3].outable = true
 
     reader := bufio.NewReader(os.Stdin)
 	_ = reader
@@ -80,11 +78,11 @@ func Mytest() {
     reader = bufio.NewReader(os.Stdin)
     fmt.Print("Enter2: ")
     reader.ReadString('\n')
-    
+
     for _, d := range ds {
         d.Stop()
     }
-    
+
     for _, d := range ds {
         fmt.Printf("rt of %d: %d\n", d.netPort, d.routingTable.length())
 
@@ -100,7 +98,10 @@ func Mytest() {
     for _, d := range ds {
         peerContacts := d.peerStore.peerContacts(ih)
         count := d.peerStore.count(ih)
-        fmt.Printf("peers on %d: %d %d\n", d.netPort, len(peerContacts), count)
+        fmt.Printf("peers on %d(%d):\n", d.netPort, count)
+		for _, v := range peerContacts {
+			fmt.Printf("\t%x %d\n", v.addr, v.cost)
+		}
     }
 
 	// time.Sleep(time.Second * 30)

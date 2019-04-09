@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"github.com/nictuku/nettools"
+
+	"encoding/json"
 )
 
 var MinNodes = 10
@@ -150,8 +152,7 @@ func (this *Duat) bootstrap() {
 		this.requestPing(r)
 		this.requestFindNode(r, this.NodeId)
 	}
-	// this.castFindNode(this.NodeId)
-	// XXX this.getMorePeers
+	this.updateHotspots()
 }
 
 func (this *Duat) Start() error {
@@ -241,7 +242,7 @@ func (this *Duat) loop() {
 		case <- routingTableCleanupTicker:
 			this.log.Infof("[Duat] clean up the routing table")
 			needPing := this.routingTable.cleanup(RoutingTableCleanupPeriod, this.peerStore)
-			if len(needPing) > 0 && false { // XXX
+			if len(needPing) > 0 {
 				go func() {
 					this.wg.Add(1)
 					defer this.wg.Done()
@@ -379,8 +380,9 @@ func (this *Duat) processPacket(p packetType) {
 		if !existed {
 			this.log.Infof("[Duat] received request from a brand new host: %v", p.raddr)
 			if this.routingTable.length() < MaxNodes {
-				this.log.Infof("[Duat] MaxNodes exceeded")
 				this.requestPingIP(addr)
+			} else {
+				this.log.Infof("[Duat] MaxNodes exceeded")
 			}
 		}
 		switch r.Q {
@@ -509,6 +511,7 @@ func (this *Duat) requestAnnouncePeer(address net.UDPAddr, ih InfoHash, port int
  */
 func (this *Duat) respondPing(addr net.UDPAddr, response responseType) {
 	this.log.Debugf("[Duat] network: respond ping to %v", addr)
+	// XXX should update the peers' cost
 	reply := replyMessage{
 		T: response.T,
 		Y: "r",
@@ -552,17 +555,26 @@ func (this *Duat) respondGetPeers(addr net.UDPAddr, r responseType) {
 		R: r0,
 	}
 
-
 	_, isMgnted := this.routingTable.hsMgnted[string(ih)]
-	// if isMgnted {
 
 	peerContacts := this.peerStore.peerContacts(ih)
-	if len(peerContacts) > 0 {
-		reply.R["values"] = peerContacts
+	// if len(peerContacts) > 0 {
+	var peerContactsEncoded []string
+	for _, peer := range peerContacts {
+		// reply.R["values"] = peerContacts
+		piw := peerInfoWire{Addr: []byte(peer.addr), Cost: peer.cost}
+		b, err := json.Marshal(piw)
+		if err == nil {
+			peerContactsEncoded = append(peerContactsEncoded, string(b))
+		} else {
+			this.log.Errorf("json marshal peer failed: %s", err)
+		}
 		//this.log.Debugf("[Duat] network: respond get_peers(%v) to Host: %v , nodeID: %x , InfoHash: %x , distance: %x. Answer(values): %d",
 		//		isMgnted, addr, r.A.Id, InfoHash(r.A.InfoHash), hashDistance(r.A.InfoHash, InfoHash(this.NodeId)), len(peerContacts))
 		// sendMsg(this.listener, addr, reply, this.log)
-	} 
+	}
+	reply.R["values"] = peerContactsEncoded
+	//}
 
 	// no peers stored, find some nodes to return
 	n := make([]string, 0, kNodes)
@@ -615,8 +627,11 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 		{
 			this.log.Infof("[Duat] receive a new peer for %x from %v", string(ih), addr)
 			peerAddr := net.TCPAddr{IP: addr.IP, Port: r.A.Port}
-			this.peerStore.addContact(ih, nettools.DottedPortToBinary(peerAddr.String()))
-			this.log.Debugf("addContact %x to %x\n", nettools.DottedPortToBinary(peerAddr.String()), string(ih))
+			peer := &peerInfo{addr: nettools.DottedPortToBinary(peerAddr.String()), via: "", cost: 0}
+			added := this.peerStore.updateContact(ih, peer)
+			this.log.Debugf("updateContact(%v) %x(cost %d via %x) to %x(now count %d)", 
+								added, nettools.DottedPortToBinary(peerAddr.String()), 
+								peer.cost, peer.via, string(ih), len(this.peerStore.peerContacts(ih)))
 				// Allow searching this node immediately, since it's telling us
 				// it has an infohash. Enables faster upgrade of other nodes to
 				// "peer" of an infohash, if the announcement is valid.
@@ -644,7 +659,7 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 /*
  *  process server respond 
  */
- func (this *Duat) processFindNodeResponse(node *remoteNode, resp responseType) {
+func (this *Duat) processFindNodeResponse(node *remoteNode, resp responseType) {
 	var nodelist string
 	query, _ := node.pendingQueries[resp.T]
 	if this.netProto == "udp6" {
@@ -652,7 +667,7 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 	} else {
 		nodelist = resp.R.Nodes
 	}
-	
+
 	if nodelist == "" {
 		this.log.Debugf("[Duat] network: got find_node response from %s, len(nodelist)=%d", nettools.BinaryToDottedPort(node.addressBinaryFormat), 0)
 		return
@@ -708,7 +723,7 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 	 }
 }
 
- func (this *Duat) processGetPeersResponse(node *remoteNode, resp responseType) {
+func (this *Duat) processGetPeersResponse(node *remoteNode, resp responseType) {
 	query, _ := node.pendingQueries[resp.T]
 	/*
 	port := this.peerStore.hasLocalDownload(query.ih)
@@ -725,9 +740,23 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 		for _, peerContact := range resp.R.Values {
 			// send peer even if we already have it in store
 			// the underlying client does/should handle dupes
-			this.peerStore.addContact(query.ih, peerContact)
-			this.log.Debugf("addContact %x to %x\n", peerContact, string(query.ih))
-			peers = append(peers, peerContact)
+			var piw peerInfoWire
+			if err := json.Unmarshal([]byte(peerContact), &piw); err != nil {
+				this.log.Errorf("json unmarshal peer failed: %s", err)
+			} else {
+				peer := &peerInfo{addr: string(piw.Addr), cost: piw.Cost}
+				readableAddr := nettools.BinaryToDottedPort(peer.addr)
+				if v, ok := this.routingTable.addresses[readableAddr]; ok && v.reachable {
+					peer.cost = 0
+					peer.via = ""
+				} else {
+					peer.cost += 1
+					peer.via = nettools.DottedPortToBinary(node.address.String())
+				}
+				added := this.peerStore.updateContact(query.ih, peer)
+				this.log.Debugf("updateContact(%v) %x(cost %d via %x) to %x\n", added, peer.addr, peer.cost, peer.via, string(query.ih))
+			}
+			// peers = append(peers, peerContact)
 		}
 		this.log.Debugf("[Duat] get new peer by get_peer response, totally %d", len(peers))
 		if len(peers) > 0 {
@@ -790,7 +819,7 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 			continue
 		}
 		this.log.Debugf("[Duat] getOrCreateNode with %s", addr)
-		
+
 		/* recursive lookup */
 		this.requestGetPeers(r, query.ih)
 		/*
@@ -806,13 +835,4 @@ func (this *Duat) respondAnnouncePeer(addr net.UDPAddr, node *remoteNode, r resp
 		this.requestGetPeers(r, query.ih)
 		*/
 	}
- }
-
- /*
-  * utils
-  */
-// XXX move function & config to routing table?
-func (this *Duat) needMoreNodes() bool {
-	n := this.routingTable.length()
-	return n < MinNodes || n*2 < MaxNodes
 }

@@ -6,66 +6,108 @@ import (
 	"github.com/golang/groupcache/lru"
 )
 
+type peerInfoWire struct {
+	Addr	[]byte
+	Cost	uint32
+}
+
+type peerInfo struct {
+	addr	string
+	via		string
+	cost	uint32
+	alive	bool
+}
+
 // For the inner map, the key address in binary form. value=ignored.
 type peerContactsSet struct {
-	set map[string]bool
+	set			map[string]*peerInfo
+	indirects	map[string]*peerInfo // peers cost > 0
 	// Needed to ensure different peers are returned each time.
-	ring *ring.Ring
+	ring		*ring.Ring
 }
 
 // next returns up to 8 peer contacts, if available. Further calls will return a
 // different set of contacts, if possible.
-func (p *peerContactsSet) next() []string {
+func (p *peerContactsSet) next() []*peerInfo {
 	count := kNodes
 	if count > len(p.set) {
 		count = len(p.set)
 	}
-	x := make([]string, 0, count)
-	xx := make(map[string]bool) //maps are easier to dedupe
+	var deleted []*peerInfo
+	var ret []*peerInfo
 	for range p.set {
-		// nid := p.ring.Move(1).Value.(string)
-		p.ring = p.ring.Next()
-		nid := p.ring.Value.(string)
-		if _, ok := xx[nid]; p.set[nid] && !ok {
-			xx[nid] = true
-		} else {
+		v := p.ring.Next().Value.(*peerInfo)
+		if !v.alive {
+			// delete died peer
+			p.ring.Unlink(1)
+			delete(p.set, v.addr)
+			delete(p.indirects, v.addr)
+
+			deleted = append(deleted, v)
+			continue
 		}
-		if len(xx) >= count {
+		p.ring = p.ring.Next()
+		ret = append(ret, v)
+		if len(ret) >= count {
 			break
 		}
 	}
 
-	if len(xx) < count {
-		for range p.set {
-			// nid := p.ring.Move(1).Value.(string)
-			p.ring = p.ring.Next()
-			nid := p.ring.Value.(string)
-			if _, ok := xx[nid]; ok {
-				continue
-			}
-			xx[nid] = true
-			if len(xx) >= count {
+	if len(ret) < count {
+		for _, v := range deleted {
+			ret = append(ret, v)
+			if len(ret) >= count {
 				break
 			}
 		}
 	}
-	for id := range xx {
-		x = append(x, id)
-	}
-	return x
+	return ret
 }
 
 // put adds a peerContact to an infohash contacts set. peerContact must be a binary encoded contact
 // address where the first four bytes form the IP and the last byte is the port. IPv6 addresses are
 // not currently supported. peerContact with less than 6 bytes will not be stored.
-func (p *peerContactsSet) put(peerContact string) bool {
-	if len(peerContact) < 6 {
+func (p *peerContactsSet) put(peerContact *peerInfo, removeIndirect bool) bool {
+	if v, ok := p.set[peerContact.addr]; ok {
+		if v.cost <= peerContact.cost && v.alive {
+			return false
+		}
+		// same target peer, but lower cost route
+		v.cost = peerContact.cost
+		v.via = peerContact.via
+		v.alive = peerContact.alive
+		if v.cost == 0 {
+			delete(p.indirects, v.addr)
+		}
+		return true
+	}
+	if removeIndirect {
+		if len(p.indirects) == 0 {
+			return false
+		}
+		for _, v := range p.indirects {
+			if v.cost <= peerContact.cost {
+				continue
+			}
+			delete(p.indirects, v.addr)
+			delete(p.set, v.addr)
+			// replace member variables so that we don't need to deal with the ring
+			v.addr = peerContact.addr
+			v.cost = peerContact.cost
+			v.via = peerContact.via
+			v.alive = peerContact.alive
+			p.set[v.addr] = v
+			if v.cost > 0 {
+				p.indirects[v.addr] = v
+			}
+			return true
+		}
 		return false
 	}
-	if ok := p.set[peerContact]; ok {
-		return false
+	p.set[peerContact.addr] = peerContact
+	if peerContact.cost > 0 {
+		p.indirects[peerContact.addr] = peerContact
 	}
-	p.set[peerContact] = true
 	r := &ring.Ring{Value: peerContact}
 	if p.ring == nil {
 		p.ring = r
@@ -75,41 +117,9 @@ func (p *peerContactsSet) put(peerContact string) bool {
 	return true
 }
 
-// drop cycles throught the peerContactSet and deletes the contact if it finds it
-// if the argument is empty, it first tries to drop a dead peer
-func (p *peerContactsSet) drop(peerContact string) string {
-	if peerContact == "" {
-		if c := p.dropDead(); c != "" {
-			return c
-		} else {
-			return p.drop(p.ring.Next().Value.(string))
-		}
-	}
-	for i := 0; i < p.ring.Len()+1; i++ {
-		if p.ring.Move(1).Value.(string) == peerContact {
-			dn := p.ring.Unlink(1).Value.(string)
-			delete(p.set, dn)
-			return dn
-		}
-	}
-	return ""
-}
-
-// dropDead drops the first dead contact, returns the id if a contact was dropped
-func (p *peerContactsSet) dropDead() string {
-	for i := 0; i < p.ring.Len()+1; i++ {
-		if !p.set[p.ring.Move(1).Value.(string)] {
-			dn := p.ring.Unlink(1).Value.(string)
-			delete(p.set, dn)
-			return dn
-		}
-	}
-	return ""
-}
-
 func (p *peerContactsSet) kill(peerContact string) {
-	if ok := p.set[peerContact]; ok {
-		p.set[peerContact] = false
+	if _, ok := p.set[peerContact]; ok {
+		p.set[peerContact].alive = false
 	}
 }
 
@@ -121,7 +131,7 @@ func (p *peerContactsSet) Size() int {
 func (p *peerContactsSet) Alive() int {
 	var ret int = 0
 	for ih := range p.set {
-		if p.set[ih] {
+		if p.set[ih].alive {
 			ret++
 		}
 	}
@@ -174,7 +184,7 @@ func (h *peerStore) alive(ih InfoHash) int {
 }
 
 // peerContacts returns a random set of 8 peers for the ih InfoHash.
-func (h *peerStore) peerContacts(ih InfoHash) []string {
+func (h *peerStore) peerContacts(ih InfoHash) []*peerInfo {
 	peers := h.get(ih)
 	if peers == nil {
 		return nil
@@ -184,29 +194,30 @@ func (h *peerStore) peerContacts(ih InfoHash) []string {
 
 // addContact as a peer for the provided ih. Returns true if the contact was
 // added, false otherwise (e.g: already present, or invalid).
-func (h *peerStore) addContact(ih InfoHash, peerContact string) bool {
+func (h *peerStore) updateContact(ih InfoHash, peerContact *peerInfo) bool {
+	peerContact.alive = true
 	var peers *peerContactsSet
 	p, ok := h.infoHashPeers.Get(string(ih))
-	if ok {
-		var okType bool
-		peers, okType = p.(*peerContactsSet)
-		if okType && peers != nil {
-			if peers.Size() >= h.maxInfoHashPeers {
-				if _, ok := peers.set[peerContact]; ok {
-					return false
-				}
-				if peers.drop("") == "" {
-					return false
-				}
-			}
-			h.infoHashPeers.Add(string(ih), peers)
-			return peers.put(peerContact)
-		}
-		// Bogus peer contacts, reset them.
+	if !ok {
+		peers = &peerContactsSet{set: make(map[string]*peerInfo), indirects: make(map[string]*peerInfo)}
+		h.infoHashPeers.Add(string(ih), peers)
+		return peers.put(peerContact, false)
 	}
-	peers = &peerContactsSet{set: make(map[string]bool)}
-	h.infoHashPeers.Add(string(ih), peers)
-	return peers.put(peerContact)
+
+	var okType bool
+	if peers, okType = p.(*peerContactsSet); !okType { // should never happend
+		peers = &peerContactsSet{set: make(map[string]*peerInfo), indirects: make(map[string]*peerInfo)}
+		h.infoHashPeers.Add(string(ih), peers)
+		return peers.put(peerContact, false)
+	}
+	/*
+	if peers.Size() >= h.maxInfoHashPeers {
+		// max peer limition exceeded
+		return peers.put(peerContact, true)
+	}
+	*/
+	// h.infoHashPeers.Add(string(ih), peers)
+	return peers.put(peerContact, peers.Size() >= h.maxInfoHashPeers)
 }
 
 func (h *peerStore) killContact(peerContact string) {

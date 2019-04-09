@@ -22,7 +22,7 @@ func newRoutingTable(log *DebugLogger) *routingTable {
 
 type hotspot struct {
 	id			string
-	typ 		int		// 1 for node, 2 for data
+	typ			int		// 1 for node, 2 for data
 	proximity	int
 	distance	uint32
 
